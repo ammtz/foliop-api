@@ -1,24 +1,43 @@
 from flask import Flask, request, jsonify
-import yfinance as yf
 from pypfopt import risk_models, expected_returns, EfficientFrontier, exceptions
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import os
 
 app = Flask(__name__)
 
-def fetch_historical_data(tickers, period="1y"):
+# Configuration
+PICKLE_PATH = os.getenv('PICKLE_PATH', 'historical_data.pkl')
+
+def get_historical_data(tickers, period="5y"):
     """
-    Fetch historical data for given tickers using yfinance
+    Get historical data from pickle file for the specified tickers
     """
-    data = pd.DataFrame()
-    for ticker in tickers:
-        try:
-            stock_data = yf.download(ticker, period=period)
-            data[ticker] = stock_data['Adj Close']
-        except Exception as e:
-            return None, f"Error fetching data for {ticker}: {str(e)}"
-    return data, None
+    try:
+        # Load the full dataset
+        df = pd.read_pickle(PICKLE_PATH)
+        
+        # Validate that all requested tickers are in the dataset
+        missing_tickers = set(tickers) - set(df.columns)
+        if missing_tickers:
+            return None, f"Missing data for tickers: {', '.join(missing_tickers)}"
+        
+        # Filter for requested tickers
+        df_filtered = df[tickers]
+        
+        # Filter for requested time period
+        if period.endswith('y'):
+            years = int(period.replace('y', ''))
+            start_date = df_filtered.index[-1] - pd.DateOffset(years=years)
+            df_filtered = df_filtered[df_filtered.index >= start_date]
+        
+        return df_filtered, None
+
+    except FileNotFoundError:
+        return None, f"Historical data file not found at {PICKLE_PATH}"
+    except Exception as e:
+        return None, f"Error loading historical data: {str(e)}"
 
 def optimize_portfolio(historical_data, strategy, target_volatility=None):
     """
@@ -76,13 +95,7 @@ def optimize_portfolio(historical_data, strategy, target_volatility=None):
 @app.route('/optimize', methods=['POST'])
 def optimize():
     """
-    Endpoint to perform portfolio optimization
-    Expected JSON payload: {
-        "tickers": ["AAPL", "GOOGL", ...],
-        "strategy": "max_sharpe"|"min_volatility"|"efficient_risk",
-        "target_volatility": 0.20,  # required only for efficient_risk strategy
-        "period": "1y"  # optional, defaults to 1y
-    }
+    Endpoint to perform portfolio optimization using stored historical data
     """
     try:
         data = request.get_json()
@@ -122,8 +135,8 @@ def optimize():
                     "error": "target_volatility must be a positive number"
                 }), 400
 
-        # Fetch historical data
-        historical_data, error = fetch_historical_data(tickers, period)
+        # Fetch historical data from pickle file
+        historical_data, error = get_historical_data(tickers, period)
         if error:
             return jsonify({"error": error}), 400
 
