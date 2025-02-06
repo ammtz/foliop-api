@@ -1,0 +1,199 @@
+import pandas as pd
+import yfinance as yf
+import pickle
+from datetime import datetime, timedelta
+import os
+import logging
+from typing import Dict, Tuple, List, Optional
+
+class DataManager:
+    def __init__(self, 
+                 baseline_path: str = "data/baseline_sp500.pkl",
+                 updated_path: str = "data/updated_sp500.pkl",
+                 sp500_tickers_path: str = "data/sp500_tickers.csv"):
+        """
+        Initialize the DataManager with file paths
+        """
+        self.baseline_path = baseline_path
+        self.updated_path = updated_path
+        self.sp500_tickers_path = sp500_tickers_path
+        
+        # Ensure data directory exists
+        os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def load_sp500_tickers(self) -> pd.DataFrame:
+        """Load S&P 500 tickers from CSV file"""
+        try:
+            return pd.read_csv(self.sp500_tickers_path)
+        except Exception as e:
+            self.logger.error(f"Error loading S&P 500 tickers: {str(e)}")
+            raise
+
+    def create_baseline_dataset(self, 
+                              start_date: str = "2020-01-01",
+                              end_date: str = "2025-01-01") -> None:
+        """
+        Create the baseline dataset from scratch
+        """
+        try:
+            self.logger.info("Creating baseline dataset...")
+            
+            # Load S&P 500 tickers
+            sp500 = self.load_sp500_tickers()
+            tickers = sp500["Ticker"].tolist()
+            
+            # Download historical data
+            self.logger.info(f"Downloading data for {len(tickers)} tickers...")
+            data = yf.download(tickers, start=start_date, end=end_date)["Adj Close"]
+            
+            # Drop tickers with missing data
+            data = data.dropna(axis=1)
+            remaining_tickers = data.columns.tolist()
+            self.logger.info(f"Retained {len(remaining_tickers)} tickers after dropping missing data")
+            
+            # Create the dataset dictionary
+            dataset = {
+                "sp500_tickers": sp500[sp500["Ticker"].isin(remaining_tickers)],
+                "historical_data": data,
+                "last_updated": datetime.now(),
+                "date_range": {"start": start_date, "end": end_date}
+            }
+            
+            # Save to pickle file
+            with open(self.baseline_path, "wb") as f:
+                pickle.dump(dataset, f)
+            
+            self.logger.info("Baseline dataset created successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error creating baseline dataset: {str(e)}")
+            raise
+
+    def update_dataset(self) -> None:
+        """
+        Update the dataset with the latest data
+        """
+        try:
+            self.logger.info("Updating dataset...")
+            
+            # Load baseline data if updated dataset doesn't exist
+            if not os.path.exists(self.updated_path) and os.path.exists(self.baseline_path):
+                with open(self.baseline_path, "rb") as f:
+                    dataset = pickle.load(f)
+                self.logger.info("Loaded baseline dataset as starting point")
+            elif os.path.exists(self.updated_path):
+                with open(self.updated_path, "rb") as f:
+                    dataset = pickle.load(f)
+                self.logger.info("Loaded existing updated dataset")
+            else:
+                raise FileNotFoundError("Neither baseline nor updated dataset exists")
+            
+            # Get the last date in the dataset
+            last_date = dataset["historical_data"].index[-1]
+            
+            # Calculate the start date for the update (last date + 1 day)
+            start_date = last_date + timedelta(days=1)
+            end_date = datetime.now()
+            
+            # Skip update if we're already up to date
+            if start_date.date() >= end_date.date():
+                self.logger.info("Dataset is already up to date")
+                return
+            
+            # Get the tickers from the existing dataset
+            tickers = dataset["historical_data"].columns.tolist()
+            
+            # Download new data
+            self.logger.info(f"Downloading new data from {start_date.date()} to {end_date.date()}")
+            new_data = yf.download(tickers, start=start_date, end=end_date)["Adj Close"]
+            
+            # Combine the datasets
+            updated_data = pd.concat([dataset["historical_data"], new_data])
+            
+            # Update the dataset dictionary
+            dataset.update({
+                "historical_data": updated_data,
+                "last_updated": datetime.now(),
+                "date_range": {
+                    "start": dataset["date_range"]["start"],
+                    "end": end_date.strftime("%Y-%m-%d")
+                }
+            })
+            
+            # Save updated dataset
+            with open(self.updated_path, "wb") as f:
+                pickle.dump(dataset, f)
+            
+            self.logger.info("Dataset updated successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error updating dataset: {str(e)}")
+            raise
+
+    def get_dataset(self, use_updated: bool = True) -> Dict:
+        """
+        Load and return the specified dataset
+        """
+        try:
+            file_path = self.updated_path if use_updated else self.baseline_path
+            
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Dataset not found at {file_path}")
+                
+            with open(file_path, "rb") as f:
+                dataset = pickle.load(f)
+                
+            return dataset
+            
+        except Exception as e:
+            self.logger.error(f"Error loading dataset: {str(e)}")
+            raise
+
+    def get_data_info(self) -> Dict:
+        """
+        Get information about both datasets
+        """
+        info = {}
+        
+        for dataset_type in ["baseline", "updated"]:
+            path = self.baseline_path if dataset_type == "baseline" else self.updated_path
+            
+            try:
+                if os.path.exists(path):
+                    with open(path, "rb") as f:
+                        dataset = pickle.load(f)
+                    
+                    info[dataset_type] = {
+                        "number_of_tickers": len(dataset["historical_data"].columns),
+                        "date_range": dataset["date_range"],
+                        "last_updated": dataset["last_updated"],
+                        "file_size_mb": os.path.getsize(path) / (1024 * 1024)
+                    }
+                else:
+                    info[dataset_type] = None
+                    
+            except Exception as e:
+                info[dataset_type] = f"Error: {str(e)}"
+        
+        return info
+
+if __name__ == "__main__":
+    # Example usage
+    data_manager = DataManager()
+    
+    # Create baseline dataset if it doesn't exist
+    if not os.path.exists(data_manager.baseline_path):
+        data_manager.create_baseline_dataset()
+    
+    # Update the dataset with latest data
+    data_manager.update_dataset()
+    
+    # Print information about both datasets
+    print(data_manager.get_data_info())
